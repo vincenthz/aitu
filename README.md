@@ -51,15 +51,32 @@ codex = "~/.codex-work"    # either key may be omitted
 
 # USD per million tokens. Only input and output are required; the cache rates
 # default to 1.25x input (5-minute write), 2x (1-hour write) and 0.1x (read).
-[prices."gpt-6-astra"]
-input      = 1.75
-output     = 14.00
-cache_read = 0.175
+[prices."some-new-model"]
+input      = 5.00
+output     = 25.00
+cache_read = 0.50
 ```
 
 With no config file, one home named `default` is used, honouring
 `CLAUDE_CONFIG_DIR` and `CODEX_HOME` and otherwise falling back to
 `~/.claude` and `~/.codex`.
+
+## Current model pricing
+
+Built-in standard rates, verified September 21, 2026, in USD per million tokens:
+
+| Model | Input | Cache read | Cache write | Output |
+| ----- | ----: | ---------: | ----------: | -----: |
+| [Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/overview) | $10 | $0.25 | $12.50 (5m), $20 (1h) | $50 |
+| [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) | $10 | $1 | $12.50 | $50 |
+
+Fable 5.1 and Astra usage is priced automatically, including provider-prefixed
+model names such as `openai/gpt-6-astra`. Astra prompts over 272,000 tokens
+(including cached tokens) use 2x input/cache rates and 1.5x output rates for
+the entire call. This is applied per call before report totals are summed.
+Config overrides replace built-in pricing with fixed rates, including for
+long prompts. Costs are API-rate estimates, not subscription charges;
+Codex service-tier premiums and discounts are not applied.
 
 ## How the numbers are arrived at
 
@@ -101,8 +118,9 @@ subtree, so `history.jsonl` at the codex home root is left alone.
 
 ## Caveats
 
-- OpenAI/Codex prices in the built-in table are **not verified** against
-  OpenAI's published pricing. Override them if the dollar figures matter.
+- Older OpenAI/Codex prices in the built-in table, other than GPT-6 Astra,
+  are **not verified** against OpenAI's published pricing. Override them if
+  the dollar figures matter.
 - Recent Codex versions also index threads in SQLite (`state_5.sqlite`).
   Only the JSONL rollouts under `sessions/` are read; a thread that exists
   solely in SQLite would be invisible.

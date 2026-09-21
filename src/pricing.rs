@@ -47,8 +47,8 @@ impl Price {
         }
     }
 
-    /// OpenAI bills cached prompt tokens at a discount and does not charge a
-    /// separate premium to write them, so a cache write costs the input rate.
+    /// Older OpenAI models bill cache writes at the input rate. Models with
+    /// a cache-write premium override those fields in the built-in table.
     const fn openai(input: f64, cache_read: f64, output: f64) -> Self {
         Self {
             input,
@@ -120,6 +120,25 @@ impl Prices {
         }
         builtin(&key, speed)
     }
+
+    /// Price each call before aggregation: Astra's long-context tier applies
+    /// to the entire request when its prompt (including cache) exceeds 272K.
+    /// Config overrides remain fixed rates and replace all built-in pricing.
+    pub fn cost(&self, model: &str, speed: Speed, tokens: &Tokens) -> Option<f64> {
+        let key = normalize(model);
+        let mut price = self.lookup(&key, speed)?;
+        if key == "gpt-6-astra"
+            && !self.overrides.contains_key(&key)
+            && tokens.billed_input() + tokens.cache_read > 272_000
+        {
+            price.input *= 2.0;
+            price.cache_read *= 2.0;
+            price.cache_write_5m *= 2.0;
+            price.cache_write_1h *= 2.0;
+            price.output *= 1.5;
+        }
+        Some(price.cost(tokens))
+    }
 }
 
 /// Reduce a logged model string to a lookup key: drop any provider prefix
@@ -158,6 +177,8 @@ fn builtin(model: &str, speed: Speed) -> Option<Price> {
     let price = match model {
         // Anthropic - https://claude.com/pricing (input/output; cache rates
         // are 1.25x / 2x / 0.1x of input unless noted).
+        // Verified 2026-09-21:
+        // https://platform.claude.com/docs/en/models/fable-5-1/overview
         "claude-fable-5-1" | "claude-mythos-5-1" => Price::anthropic_read(10.00, 50.00, 0.25),
         "claude-fable-5" | "claude-mythos-5" => Price::anthropic(10.00, 50.00),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
@@ -169,7 +190,15 @@ fn builtin(model: &str, speed: Speed) -> Option<Price> {
         }
         "claude-haiku-4-5" => Price::anthropic(1.00, 5.00),
 
-        // OpenAI. These rates are carried over from prior tooling and are NOT
+        // Verified 2026-09-21 (long-context multipliers applied in Prices::cost):
+        // https://developers.openai.com/api/docs/models/gpt-6-astra
+        "gpt-6-astra" => Price {
+            cache_write_5m: 12.50,
+            cache_write_1h: 12.50,
+            ..Price::openai(10.00, 1.00, 50.00)
+        },
+
+        // Older OpenAI rates are carried over from prior tooling and are NOT
         // verified against OpenAI's published pricing - override them in the
         // config file if the dollar figures matter to you.
         "gpt-5.5" => Price::openai(5.00, 0.50, 30.00),
@@ -220,6 +249,7 @@ mod tests {
             "claude-sonnet-5",
             "claude-haiku-4-5",
             "claude-fable-5-1",
+            "gpt-6-astra",
         ] {
             assert!(
                 prices.lookup(model, Speed::Standard).is_some(),
@@ -236,6 +266,49 @@ mod tests {
 
         assert_eq!(price.cache_read, 0.25);
         assert_eq!(price.input, 10.00);
+        assert_eq!(price.cache_write_5m, 12.50);
+        assert_eq!(price.cache_write_1h, 20.00);
+        assert_eq!(price.output, 50.00);
+        assert_eq!(price.cost(&tokens()), 92.75);
+    }
+
+    #[test]
+    fn astra_prices_uncached_cached_and_cache_write_tokens() {
+        let tokens = Tokens {
+            input: 10_000,
+            cache_read: 100_000,
+            cache_write_5m: 20_000,
+            output: 1_000,
+            ..Tokens::default()
+        };
+        let cost = Prices::default()
+            .cost("openai/gpt-6-astra", Speed::Standard, &tokens)
+            .unwrap();
+
+        // $0.10 input + $0.10 read + $0.25 write + $0.05 output.
+        assert!((cost - 0.50).abs() < 1e-10);
+    }
+
+    #[test]
+    fn astra_long_context_tier_counts_all_prompt_buckets_but_not_output() {
+        let prices = Prices::default();
+        let mut tokens = Tokens {
+            input: 2_000,
+            cache_read: 250_000,
+            cache_write_5m: 20_000,
+            output: 10_000,
+            ..Tokens::default()
+        };
+        let standard = prices
+            .cost("gpt-6-astra", Speed::Standard, &tokens)
+            .unwrap();
+        assert!((standard - 1.02).abs() < 1e-10);
+
+        tokens.cache_read += 1;
+        let long = prices
+            .cost("openai/gpt-6-astra", Speed::Standard, &tokens)
+            .unwrap();
+        assert!((long - 1.790002).abs() < 1e-10);
     }
 
     #[test]
@@ -306,6 +379,22 @@ mod tests {
     #[test]
     fn overrides_can_price_a_model_the_table_has_never_heard_of() {
         let prices = Prices::new(&[(
+            String::from("openai/some-new-model"),
+            PriceOverride {
+                input: 3.0,
+                output: 12.0,
+                cache_write_5m: Some(3.0),
+                cache_write_1h: Some(3.0),
+                cache_read: Some(0.3),
+            },
+        )]);
+
+        assert!(prices.lookup("some-new-model", Speed::Standard).is_some());
+    }
+
+    #[test]
+    fn astra_override_replaces_long_context_pricing_too() {
+        let prices = Prices::new(&[(
             String::from("openai/gpt-6-astra"),
             PriceOverride {
                 input: 3.0,
@@ -316,6 +405,9 @@ mod tests {
             },
         )]);
 
-        assert!(prices.lookup("gpt-6-astra", Speed::Standard).is_some());
+        assert_eq!(
+            prices.cost("gpt-6-astra", Speed::Standard, &tokens()),
+            Some(21.3)
+        );
     }
 }

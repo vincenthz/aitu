@@ -23,8 +23,8 @@ impl Totals {
         self.tokens.add(&event.tokens);
         self.calls += 1;
         self.sessions.insert(event.session.clone());
-        match prices.lookup(&event.model, event.speed) {
-            Some(price) => self.usd += price.cost(&event.tokens),
+        match prices.cost(&event.model, event.speed, &event.tokens) {
+            Some(cost) => self.usd += cost,
             None => {
                 self.unpriced_calls += 1;
                 self.unpriced_tokens += event.tokens.total();
@@ -211,6 +211,29 @@ mod tests {
         assert_eq!(grouped.rows[0].1.calls, 2);
         assert_eq!(grouped.overall.sessions(), 2);
         assert_eq!(grouped.overall.tokens.input, 6_000_000);
+    }
+
+    #[test]
+    fn current_models_are_priced_per_call_before_aggregation() {
+        let prices = Prices::default();
+        let mut events = vec![
+            event("openai/gpt-6-astra", "a", 200_000),
+            event("openai/gpt-6-astra", "a", 200_000),
+            event("openai/gpt-6-astra", "b", 300_000),
+            event("claude-fable-5-1", "c", 1_000_000),
+        ];
+        for event in &mut events[..3] {
+            event.agent = Agent::Codex;
+        }
+
+        let grouped = group_by(&events, &prices, |e| e.agent);
+
+        // Two standard Astra calls, one long call, and one Fable call.
+        // The two standard calls must not trigger the long tier when summed.
+        assert!((grouped.overall.usd - 20.00225).abs() < 1e-10);
+        assert_eq!(grouped.overall.cost_cell(), "$20.00");
+        assert!(!grouped.overall.is_partial());
+        assert!(unpriced_models(&events, &prices).is_empty());
     }
 
     #[test]
