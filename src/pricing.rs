@@ -166,9 +166,10 @@ fn strip_snapshot(model: &str) -> String {
 /// Matching is exact against the key, never a substring test: a substring
 /// match on a name like `opus-4` silently captures every future `opus-4x`.
 fn builtin(model: &str, speed: Speed) -> Option<Price> {
-    // Claude Opus 5 fast mode is billed at a premium over standard.
+    // Claude Opus fast mode is billed at a premium over standard.
     if speed == Speed::Fast {
         return match model {
+            "claude-opus-5-5" => Some(Price::anthropic_read(8.00, 40.00, 0.40)),
             "claude-opus-5" | "claude-opus-4-8" => Some(Price::anthropic(10.00, 50.00)),
             _ => builtin(model, Speed::Standard),
         };
@@ -181,6 +182,9 @@ fn builtin(model: &str, speed: Speed) -> Option<Price> {
         // https://platform.claude.com/docs/en/models/fable-5-1/overview
         "claude-fable-5-1" | "claude-mythos-5-1" => Price::anthropic_read(10.00, 50.00, 0.25),
         "claude-fable-5" | "claude-mythos-5" => Price::anthropic(10.00, 50.00),
+        // Verified 2026-09-24:
+        // https://platform.claude.com/docs/en/models/opus-5-5/overview
+        "claude-opus-5-5" => Price::anthropic_read(4.00, 20.00, 0.20),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-opus-4-5" => Price::anthropic(5.00, 25.00),
         "claude-opus-4-1" | "claude-opus-4-0" | "claude-opus-4" => Price::anthropic(15.00, 75.00),
@@ -245,6 +249,7 @@ mod tests {
     fn current_models_are_priced() {
         let prices = Prices::default();
         for model in [
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-sonnet-5",
             "claude-haiku-4-5",
@@ -270,6 +275,32 @@ mod tests {
         assert_eq!(price.cache_write_1h, 20.00);
         assert_eq!(price.output, 50.00);
         assert_eq!(price.cost(&tokens()), 92.75);
+    }
+
+    #[test]
+    fn opus_5_5_has_a_cheaper_cache_read_than_the_standard_multiplier() {
+        let price = Prices::default()
+            .lookup("claude-opus-5-5", Speed::Standard)
+            .unwrap();
+
+        assert_eq!(price.input, 4.00);
+        assert_eq!(price.cache_write_5m, 5.00);
+        assert_eq!(price.cache_write_1h, 8.00);
+        assert_eq!(price.cache_read, 0.20);
+        assert_eq!(price.output, 20.00);
+        // 4.00 + 0.20 + 5.00 + 8.00 + 20.00
+        assert_eq!(format!("{:.2}", price.cost(&tokens())), "37.20");
+    }
+
+    #[test]
+    fn opus_5_5_fast_mode_is_twice_standard() {
+        let prices = Prices::default();
+        let standard = prices.lookup("claude-opus-5-5", Speed::Standard).unwrap();
+        let fast = prices.lookup("claude-opus-5-5", Speed::Fast).unwrap();
+
+        assert_eq!(fast.input, standard.input * 2.0);
+        assert_eq!(fast.output, standard.output * 2.0);
+        assert_eq!(fast.cache_read, standard.cache_read * 2.0);
     }
 
     #[test]
