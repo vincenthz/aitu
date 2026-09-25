@@ -63,19 +63,23 @@ With no config file, one home named `default` is used, honouring
 
 ## Current model pricing
 
-Built-in standard rates, verified September 21, 2026 (Opus 5.5: September 24, 2026), in USD per million tokens:
+Built-in standard rates, verified September 21, 2026 (Opus 5.5: September 24, 2026; GPT-5.6: September 25, 2026, from third-party rate cards), in USD per million tokens:
 
 | Model | Input | Cache read | Cache write | Output |
 | ----- | ----: | ---------: | ----------: | -----: |
 | [Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/overview) | $10 | $0.25 | $12.50 (5m), $20 (1h) | $50 |
 | [Claude Opus 5.5](https://platform.claude.com/docs/en/models/opus-5-5/overview) | $4 | $0.20 | $5 (5m), $8 (1h) | $20 |
 | [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) | $10 | $1 | $12.50 | $50 |
+| [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | $4 | $0.40 | $5 | $20 |
+| [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | $2 | $0.20 | $2.50 | $12 |
+| [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | $0.20 | $0.02 | $0.25 | $1.20 |
 
-Fable 5.1, Opus 5.5 and Astra usage is priced automatically (Opus 5.5 fast mode at
-2x standard), including provider-prefixed
-model names such as `openai/gpt-6-astra`. Astra prompts over 272,000 tokens
-(including cached tokens) use 2x input/cache rates and 1.5x output rates for
-the entire call. This is applied per call before report totals are summed.
+Fable 5.1, Opus 5.5, Astra and GPT-5.6 usage is priced automatically (Opus 5.5
+fast mode at 2x standard), including provider-prefixed model names such as
+`openai/gpt-6-astra`; the bare `gpt-5.6` alias is priced as Sol. Sol's rates are
+promotional, guaranteed through at least November 21, 2026. Astra and GPT-5.6
+prompts over 272,000 tokens (including cached tokens) use 2x input/cache rates
+and 1.5x output rates for the entire call. This is applied per call before report totals are summed.
 Config overrides replace built-in pricing with fixed rates, including for
 long prompts. Costs are API-rate estimates, not subscription charges;
 Codex service-tier premiums and discounts are not applied.
@@ -121,8 +125,9 @@ subtree, so `history.jsonl` at the codex home root is left alone.
 ## Caveats
 
 - Older OpenAI/Codex prices in the built-in table, other than GPT-6 Astra,
-  are **not verified** against OpenAI's published pricing. Override them if
-  the dollar figures matter.
+  are **not verified** against OpenAI's published pricing (GPT-5.6 was checked
+  against third-party rate cards only). Override them if the dollar figures
+  matter.
 - Recent Codex versions also index threads in SQLite (`state_5.sqlite`).
   Only the JSONL rollouts under `sessions/` are read; a thread that exists
   solely in SQLite would be invisible.

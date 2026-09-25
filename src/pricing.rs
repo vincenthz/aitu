@@ -121,13 +121,14 @@ impl Prices {
         builtin(&key, speed)
     }
 
-    /// Price each call before aggregation: Astra's long-context tier applies
-    /// to the entire request when its prompt (including cache) exceeds 272K.
-    /// Config overrides remain fixed rates and replace all built-in pricing.
+    /// Price each call before aggregation: the long-context tier of Astra
+    /// and GPT-5.6 applies to the entire request when its prompt (including
+    /// cache) exceeds 272K. Config overrides remain fixed rates and replace
+    /// all built-in pricing.
     pub fn cost(&self, model: &str, speed: Speed, tokens: &Tokens) -> Option<f64> {
         let key = normalize(model);
         let mut price = self.lookup(&key, speed)?;
-        if key == "gpt-6-astra"
+        if has_long_context_tier(&key)
             && !self.overrides.contains_key(&key)
             && tokens.billed_input() + tokens.cache_read > 272_000
         {
@@ -139,6 +140,15 @@ impl Prices {
         }
         Some(price.cost(tokens))
     }
+}
+
+/// OpenAI models billed at 2x input/cache and 1.5x output for the whole call
+/// once the prompt exceeds 272K tokens.
+fn has_long_context_tier(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-6-astra" | "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+    )
 }
 
 /// Reduce a logged model string to a lookup key: drop any provider prefix
@@ -202,6 +212,28 @@ fn builtin(model: &str, speed: Speed) -> Option<Price> {
             ..Price::openai(10.00, 1.00, 50.00)
         },
 
+        // Checked 2026-09-25 against third-party rate cards that agree with
+        // each other (OpenAI's own pages were not reachable); cache writes
+        // are 1.25x input and long-context multipliers are applied in
+        // Prices::cost. `gpt-5.6` is an alias for Sol. Sol's rates are
+        // promotional, through at least 2026-11-21:
+        // https://developers.openai.com/api/docs/models/gpt-5.6-sol
+        "gpt-5.6-sol" | "gpt-5.6" => Price {
+            cache_write_5m: 5.00,
+            cache_write_1h: 5.00,
+            ..Price::openai(4.00, 0.40, 20.00)
+        },
+        "gpt-5.6-terra" => Price {
+            cache_write_5m: 2.50,
+            cache_write_1h: 2.50,
+            ..Price::openai(2.00, 0.20, 12.00)
+        },
+        "gpt-5.6-luna" => Price {
+            cache_write_5m: 0.25,
+            cache_write_1h: 0.25,
+            ..Price::openai(0.20, 0.02, 1.20)
+        },
+
         // Older OpenAI rates are carried over from prior tooling and are NOT
         // verified against OpenAI's published pricing - override them in the
         // config file if the dollar figures matter to you.
@@ -255,6 +287,10 @@ mod tests {
             "claude-haiku-4-5",
             "claude-fable-5-1",
             "gpt-6-astra",
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
         ] {
             assert!(
                 prices.lookup(model, Speed::Standard).is_some(),
@@ -340,6 +376,39 @@ mod tests {
             .cost("openai/gpt-6-astra", Speed::Standard, &tokens)
             .unwrap();
         assert!((long - 1.790002).abs() < 1e-10);
+    }
+
+    #[test]
+    fn gpt_5_6_rates() {
+        let prices = Prices::default();
+        let sol = prices.lookup("openai/gpt-5.6-sol", Speed::Standard).unwrap();
+        let terra = prices.lookup("gpt-5.6-terra", Speed::Standard).unwrap();
+        let luna = prices.lookup("gpt-5.6-luna", Speed::Standard).unwrap();
+
+        assert_eq!(prices.lookup("gpt-5.6", Speed::Standard), Some(sol));
+        // input + read + two write buckets + output
+        assert_eq!(format!("{:.2}", sol.cost(&tokens())), "34.40");
+        assert_eq!(format!("{:.2}", terra.cost(&tokens())), "19.20");
+        assert_eq!(format!("{:.2}", luna.cost(&tokens())), "1.92");
+    }
+
+    #[test]
+    fn gpt_5_6_long_context_tier_applies_above_272k() {
+        let prices = Prices::default();
+        let mut tokens = Tokens {
+            input: 22_000,
+            cache_read: 250_000,
+            output: 10_000,
+            ..Tokens::default()
+        };
+        // $0.088 input + $0.10 read + $0.20 output
+        let standard = prices.cost("gpt-5.6-sol", Speed::Standard, &tokens).unwrap();
+        assert!((standard - 0.388).abs() < 1e-10);
+
+        tokens.input += 1;
+        // $0.176008 input + $0.20 read + $0.30 output
+        let long = prices.cost("gpt-5.6-sol", Speed::Standard, &tokens).unwrap();
+        assert!((long - 0.676008).abs() < 1e-10);
     }
 
     #[test]
