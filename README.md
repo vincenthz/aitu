@@ -34,6 +34,26 @@ Flags, all global: `--home/-H NAME` (repeatable) to pick homes, `--agent/-a`
 to pick one agent, `--since`/`--until` for a day range, `--limit/-n` for rows,
 `--utc` to bucket days by UTC instead of the local timezone.
 
+List token usage for the last N calendar days, including today:
+
+```sh
+aitu days --last 7
+aitu days --last 30 --agent codex
+aitu days --last 7 --sum
+aitu summary --last 7
+```
+
+`--last N` works with all usage reports and cannot be combined with `--since`
+or `--until`. It uses the local calendar (or UTC with `--utc`) and excludes
+future dates. `days --last N` shows every day with usage in that range, most
+recent first; days without usage are omitted. An explicit `--limit` can cap
+the number of rows; other reports still default to 20 rows.
+
+Add `--sum` to `days` to append a total row for the full selected date range,
+including days hidden by `--limit`. It sums calls, tokens, and estimated cost;
+sessions spanning multiple days are counted once. It also works with
+`--since`/`--until`, or all available dates when no date filter is given.
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/aitu/config.toml`, else `~/.config/aitu/config.toml`;

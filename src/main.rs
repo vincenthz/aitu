@@ -43,19 +43,47 @@ struct Cli {
     #[arg(long, global = true, value_name = "DATE")]
     until: Option<String>,
 
+    /// Only include the last N calendar days, including today.
+    #[arg(
+        long,
+        global = true,
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..),
+        conflicts_with_all = ["since", "until"]
+    )]
+    last: Option<u32>,
+
     /// Bucket days by UTC instead of the machine's timezone.
     #[arg(long, global = true)]
     utc: bool,
 
-    /// Maximum rows per table.
-    #[arg(
-        long,
-        short = 'n',
-        global = true,
-        value_name = "N",
-        default_value_t = 20
-    )]
-    limit: usize,
+    /// Maximum rows per table (default: 20, or all days with `days --last N`).
+    #[arg(long, short = 'n', global = true, value_name = "N")]
+    limit: Option<usize>,
+}
+
+impl Cli {
+    fn date_range(&self, clock: Clock) -> Result<Range> {
+        match self.last {
+            Some(_) if self.since.is_some() || self.until.is_some() => {
+                Err(anyhow!("--last cannot be combined with --since or --until"))
+            }
+            Some(days) => Range::last_days(days, clock.today()),
+            None => Range::new(self.since.as_deref(), self.until.as_deref()),
+        }
+    }
+
+    fn row_limit(&self) -> usize {
+        self.limit
+            .unwrap_or_else(|| {
+                if matches!(self.command, Some(Command::Days { .. })) && self.last.is_some() {
+                    usize::MAX
+                } else {
+                    20
+                }
+            })
+            .max(1)
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -63,7 +91,11 @@ enum Command {
     /// Totals per agent, and per home when more than one has usage.
     Summary,
     /// Daily totals, most recent first.
-    Days,
+    Days {
+        /// Append totals for all matching days, including rows hidden by --limit.
+        #[arg(long)]
+        sum: bool,
+    },
     /// Totals per working directory.
     Projects,
     /// Totals per model, and which models have no price.
@@ -122,7 +154,7 @@ fn run() -> Result<()> {
         })
         .transpose()?;
     let homes = select_homes(&config, &cli.homes)?;
-    let range = Range::new(cli.since.as_deref(), cli.until.as_deref())?;
+    let range = cli.date_range(clock)?;
 
     if matches!(command, Command::Homes) {
         return emit(&show_homes(&config, &homes, clock, &prices));
@@ -142,10 +174,10 @@ fn run() -> Result<()> {
         return emit(&out);
     }
 
-    let limit = cli.limit.max(1);
+    let limit = cli.row_limit();
     let mut out = match command {
         Command::Summary => summary(&events, &prices, &homes, clock, &range),
-        Command::Days => days(&events, &prices, limit, clock),
+        Command::Days { sum } => days(&events, &prices, limit, clock, sum),
         Command::Projects => projects(&events, &prices, limit),
         Command::Models => models(&events, &prices, limit),
         Command::Sessions => sessions(&events, &prices, limit),
@@ -263,16 +295,19 @@ fn summary(
     out
 }
 
-fn days(events: &[Event], prices: &Prices, limit: usize, clock: Clock) -> String {
+fn days(events: &[Event], prices: &Prices, limit: usize, clock: Clock, sum: bool) -> String {
     let grouped = group_by(events, prices, |event| event.date.clone());
     // Most recent first.
-    let rows: Vec<Vec<String>> = grouped
+    let mut rows: Vec<Vec<String>> = grouped
         .rows
         .iter()
         .rev()
         .take(limit)
         .map(|(date, totals)| named_row(date, totals))
         .collect();
+    if sum {
+        rows.push(named_row("total", &grouped.overall));
+    }
 
     let mut out = format!("daily usage  ({} days)\n\n", clock.label());
     out.push_str(&table(&headers("date"), &rows));
@@ -479,5 +514,105 @@ fn plural(count: usize, noun: &str) -> String {
         format!("{count} {noun}")
     } else {
         format!("{count} {noun}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sum_is_an_optional_daily_report_flag() {
+        let cli = Cli::try_parse_from(["aitu", "days", "--last", "7", "--sum"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Days { sum: true })));
+        assert_eq!(cli.last, Some(7));
+        let cli = Cli::try_parse_from(["aitu", "days"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Days { sum: false })));
+    }
+
+    #[test]
+    fn daily_sum_includes_hidden_days_and_counts_sessions_once() {
+        use usage::{Speed, Tokens};
+
+        let events: Vec<Event> = ["2026-10-17", "2026-10-18"]
+            .into_iter()
+            .map(|date| Event {
+                agent: Agent::Claude,
+                home: "default".into(),
+                session: "shared-session".into(),
+                date: date.into(),
+                project: "/work".into(),
+                model: "unknown-model".into(),
+                speed: Speed::Standard,
+                tokens: Tokens {
+                    input: 10,
+                    cache_write_5m: 2,
+                    cache_write_1h: 3,
+                    cache_read: 20,
+                    output: 5,
+                },
+            })
+            .collect();
+        let prices = Prices::default();
+        let output = days(&events, &prices, 1, Clock::Utc, true);
+        assert!(output.contains("2026-10-18"));
+        assert!(!output.contains("2026-10-17"));
+        let total = output
+            .lines()
+            .find(|line| line.starts_with("total"))
+            .unwrap();
+        assert_eq!(
+            total.split_whitespace().collect::<Vec<_>>(),
+            ["total", "1", "2", "20", "10", "40", "10", "80", "n/a"]
+        );
+        assert!(output.contains("1 of 2 days"));
+        assert!(
+            !days(&events, &prices, 1, Clock::Utc, false)
+                .lines()
+                .any(|line| line.starts_with("total"))
+        );
+    }
+
+    #[test]
+    fn last_is_global_and_daily_report_is_not_truncated_by_default() {
+        for args in [
+            vec!["aitu", "days", "--last", "30"],
+            vec!["aitu", "--last", "30", "days"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.last, Some(30));
+            assert!(cli.row_limit() >= 30);
+        }
+        let cli = Cli::try_parse_from(["aitu", "days", "--last", "30", "-n", "5"]).unwrap();
+        assert_eq!(cli.row_limit(), 5);
+        for args in [
+            vec!["aitu", "days"],
+            vec!["aitu", "sessions", "--last", "30"],
+            vec!["aitu", "--last", "7"],
+        ] {
+            assert_eq!(Cli::try_parse_from(args).unwrap().row_limit(), 20);
+        }
+    }
+
+    #[test]
+    fn last_rejects_invalid_values_and_explicit_date_bounds() {
+        for value in ["0", "-1", "abc", "4294967296"] {
+            assert!(Cli::try_parse_from(["aitu", "days", "--last", value]).is_err());
+        }
+        for bound in ["--since", "--until"] {
+            assert!(
+                Cli::try_parse_from(["aitu", "days", "--last", "7", bound, "2026-10-17"]).is_err()
+            );
+            // Clap may accept conflicting global flags on opposite sides of
+            // a subcommand; range resolution must reject those too.
+            for args in [
+                ["aitu", bound, "2026-10-17", "days", "--last", "7"],
+                ["aitu", "--last", "7", "days", bound, "2026-10-17"],
+            ] {
+                if let Ok(cli) = Cli::try_parse_from(args) {
+                    assert!(cli.date_range(Clock::Utc).is_err());
+                }
+            }
+        }
     }
 }
